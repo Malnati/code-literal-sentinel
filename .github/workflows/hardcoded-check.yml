@@ -1,0 +1,143 @@
+# .github/workflows/hardcoded-check.yml
+name: "🔐 hardcoded-check"
+
+on:
+  workflow_call:
+    secrets:
+      token:
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  hardcoded-index:
+    if: ${{ github.event_name == 'pull_request' &&
+            github.event.pull_request.changed_files > 0 &&
+            !startsWith(github.event.pull_request.head.ref, 'dev') &&
+            !startsWith(github.event.pull_request.head.ref, 'h') &&
+            !startsWith(github.event.pull_request.head.ref, 'pr') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR head branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Generate hardcoded literals index
+        id: generate-hardcoded-index
+        run: |
+          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+          HEAD_BRANCH="${{ github.event.pull_request.head.ref }}"
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          mkdir -p .github/reports/hardcoded
+
+          FILES="$(git diff --name-only --diff-filter=ACMRTUXB "$BASE_SHA" "$HEAD_SHA" \
+            | grep -E '\.(ts|js|jsx|tsx|java|py|sh|bash)$' || true)"
+
+          INDEX_FILE=".github/reports/hardcoded/PR${PR_NUMBER}-index.md"
+          PATTERN="\"[^\"]{2,}\"|'[^']{2,}'"
+          HAS_REPORT="false"
+
+          if [ -z "$FILES" ]; then
+            echo "✅ Nenhum arquivo com extensão monitorada modificado na PR. Nada para indexar."
+          else
+            RESULTS="$(echo "$FILES" | xargs -r grep -HnE "$PATTERN" || true)"
+
+            if [ -z "$RESULTS" ]; then
+              echo "✅ Nenhum literal hardcoded encontrado nos arquivos modificados."
+            else
+              {
+                echo "# Índice de literais hardcoded"
+                echo
+                echo "- Pull Request: #${PR_NUMBER}"
+                echo "- Branch base: \`$BASE_BRANCH\`"
+                echo "- Branch origem: \`$HEAD_BRANCH\`"
+                echo "- SHA base: \`$BASE_SHA\`"
+                echo "- SHA head: \`$HEAD_SHA\`"
+                echo "- Data (UTC): \`$TS\`"
+                echo
+                echo "## Índice por arquivo"
+                echo
+                echo "$RESULTS" | awk -F: '
+                  {
+                    file=$1; line=$2;
+                    sub($1 ":" $2 ":", "", $0);
+                    gsub(/`/, "\\`", $0);
+                    if (file != last_file) {
+                      if (last_file != "") print "";
+                      print "### `" file "`";
+                      last_file=file;
+                    }
+                    print "- Linha " line " - " $0;
+                  }
+                '
+              } > "$INDEX_FILE"
+
+              echo "✅ Índice de literais hardcoded gerado com sucesso."
+              echo "📄 Relatório gerado em: $INDEX_FILE"
+
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add "$INDEX_FILE"
+              git commit -m "hardcoded: índice PR${PR_NUMBER} ${TS}" || true
+
+              HAS_REPORT="true"
+            fi
+          fi
+
+          {
+            echo "has_report=$HAS_REPORT"
+            echo "report_path=$INDEX_FILE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Comment hardcoded report in PR
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HAS_REPORT: ${{ steps.generate-hardcoded-index.outputs.has_report }}
+          REPORT_PATH: ${{ steps.generate-hardcoded-index.outputs.report_path }}
+        run: |
+          if [ "${HAS_REPORT}" != "true" ]; then
+            MSG="✅ Nenhum literal hardcoded encontrado nos arquivos modificados.\n\n"
+            JSON_BODY="$(printf '%b' "$MSG" | python -c 'import json,sys; print(json.dumps({'"'"'body'"'"': sys.stdin.read()}))')"
+
+            curl -sS \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -X POST "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              -d "$JSON_BODY" || true
+
+            exit 0
+          fi
+
+          if [ -z "$REPORT_PATH" ] || [ ! -f "$REPORT_PATH" ]; then
+            echo "ℹ️ Relatório não encontrado em $REPORT_PATH; nenhum comentário será criado."
+            exit 0
+          fi
+
+          SUMMARY="$(head -n 40 "$REPORT_PATH" || true)"
+
+          MSG="✅ Índice de literais hardcoded gerado com sucesso.\n\n"
+          MSG+="📄 Caminho do relatório: \`$REPORT_PATH\`\n\n"
+          MSG+="📝 Prévia do conteúdo:\n"
+          MSG+="\`\`\`markdown\n$SUMMARY\n\`\`\`\n"
+
+          JSON_BODY="$(printf '%b' "$MSG" | python -c 'import json,sys; print(json.dumps({'"'"'body'"'"': sys.stdin.read()}))')"
+
+          curl -sS \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -X POST "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            -d "$JSON_BODY" || true
+
+          exit 0
