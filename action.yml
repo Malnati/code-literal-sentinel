@@ -1,4 +1,4 @@
-# .github/workflows/hardcoded-check.yml
+# action.yml
 name: "🔐 hardcoded-check"
 
 on:
