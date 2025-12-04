@@ -1,6 +1,6 @@
-# Malnati/code-literal-sentinel@v2.1.1
+# Malnati/code-literal-sentinel@v2.3.0
 name: "Code Literal Sentinel"
-description: "Varredura agressiva de literais. Gera um relatório e abre uma PR dedicada para análise."
+description: "Varredura agressiva com verificação global de idempotência (Deep Search)."
 author: "Ricardo Malnati"
 
 branding:
@@ -41,21 +41,21 @@ runs:
         EXTS: ${{ inputs.file_extensions }}
         DIR: ${{ inputs.report_dir }}
       run: |
-        echo "::group::🔍 Step 0: Sentinel Configuration (v2.1.1)"
-        echo "⚙️  Extensions: .($EXTS)"
-        echo "⚙️  Target Dir: $DIR"
+        echo "::group::🔍 Step 0: Sentinel Configuration (v2.3.0)"
+        echo "👁️  Code Literal Sentinel (Global Idempotency Mode)"
+        echo "⚙️  Configuração:"
+        echo "    - Extensões: .($EXTS)"
+        echo "    - Destino:   $DIR"
         echo "::endgroup::"
 
     # ------------------------------------------------------------------
-    # STEP 0.1: CIRCUIT BREAKER (ROBUSTO)
-    # Usamos a expressão do GitHub para pular TUDO se for branch de auditoria
+    # STEP 0.1: CIRCUIT BREAKER (TIPO 1 - Branch Name)
     # ------------------------------------------------------------------
     - id: circuit_breaker
       shell: bash
-      # AQUI ESTÁ A CORREÇÃO: Usamos output para controlar os próximos passos
       run: |
         if [[ "${{ github.head_ref }}" == "sentinel/"* ]]; then
-           echo "🛑 Loop detectado. Branch de auditoria."
+           echo "🛑 Loop detectado. Execução em branch de auditoria ignorada."
            echo "skip=true" >> "$GITHUB_OUTPUT"
         else
            echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -76,10 +76,53 @@ runs:
         fi
 
     # ------------------------------------------------------------------
-    # STEP 1: SCAN
+    # STEP 0.8: IDEMPOTÊNCIA GLOBAL (Deep Search)
+    # Procura em todo o histórico do git se este SHA já foi auditado
+    # ------------------------------------------------------------------
+    - id: global_check
+      if: steps.circuit_breaker.outputs.skip != 'true'
+      shell: bash
+      env:
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        echo "::group::🕵️ Step 0.8: Global Audit Search"
+        
+        # Verifica se é shallow clone (comum em CI) e tenta buscar histórico para pesquisa
+        if [ -f .git/shallow ]; then
+           echo "⚠️  Repositório shallow detectado. A busca global pode ser limitada."
+           echo "    Recomendado: 'fetch-depth: 0' no checkout."
+           # Tentativa de fetch silenciosa (pode demorar em repos gigantes)
+           # git fetch --unshallow --filter=blob:none &>/dev/null || true
+        fi
+
+        SEARCH_KEY="> **Source SHA:** $HEAD_SHA"
+        echo "🔍 Procurando assinatura de auditoria: '$SEARCH_KEY'"
+        echo "   Escopo: Todas as referências (Branches, Tags, Remotes)"
+
+        # O comando mágico:
+        # 1. git rev-list --all: Lista todos os commits acessíveis
+        # 2. git grep: Procura a string dentro desses commits
+        # 3. -- "*.md": Otimização, olha apenas arquivos markdown
+        
+        FOUND_REF=$(git grep -I -F -l "$SEARCH_KEY" $(git rev-list --all) -- "*.md" | head -n 1 || true)
+        
+        if [ -n "$FOUND_REF" ]; then
+           echo "✅ Auditoria prévia encontrada!"
+           echo "   Referência Git: $FOUND_REF"
+           echo "   O código atual ($HEAD_SHA) já possui um relatório válido no histórico."
+           echo "found=true" >> "$GITHUB_OUTPUT"
+           echo "ref=$FOUND_REF" >> "$GITHUB_OUTPUT"
+        else
+           echo "⚪ Nenhuma auditoria prévia encontrada para este SHA."
+           echo "found=false" >> "$GITHUB_OUTPUT"
+        fi
+        echo "::endgroup::"
+
+    # ------------------------------------------------------------------
+    # STEP 1: SCAN (Só roda se não achou globalmente)
     # ------------------------------------------------------------------
     - id: scan
-      if: steps.circuit_breaker.outputs.skip != 'true'
+      if: steps.circuit_breaker.outputs.skip != 'true' && steps.global_check.outputs.found != 'true'
       shell: bash
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -89,9 +132,8 @@ runs:
         REPORT_DIR: ${{ inputs.report_dir }}
       run: |
         set -euo pipefail
-        echo "🔎 Scanning..."
+        echo "🔎 Scanning diff..."
         
-        # Nome fixo para garantir idempotência
         FILENAME="audit-report.md"
         FULL_PATH="./$REPORT_DIR/$FILENAME"
         mkdir -p "$REPORT_DIR"
@@ -109,6 +151,7 @@ runs:
         PATTERN="\"[^\"]{2,}\"|'[^']{2,}'"
         
         echo "# 🛡️ Code Literal Audit" > "$FULL_PATH"
+        echo "> **Source SHA:** $HEAD_SHA" >> "$FULL_PATH"
         echo "> **Data:** $(date -u)" >> "$FULL_PATH"
         echo "" >> "$FULL_PATH"
         echo "\`\`\`text" >> "$FULL_PATH"
@@ -128,15 +171,15 @@ runs:
         fi
 
     # ------------------------------------------------------------------
-    # STEP 2: GIT OPS (BRANCH & PR)
+    # STEP 2: GIT OPS
     # ------------------------------------------------------------------
     - id: create_pr
-      if: steps.circuit_breaker.outputs.skip != 'true'
+      if: steps.circuit_breaker.outputs.skip != 'true' && steps.global_check.outputs.found != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
         REPORT_PATH: ${{ steps.scan.outputs.path }}
-        HEAD_REF: ${{ github.head_ref }} # Usando contexto direto é mais seguro
+        HEAD_REF: ${{ github.head_ref }}
         PR_NUM: ${{ github.event.pull_request.number }}
       run: |
         set -euo pipefail
@@ -148,19 +191,15 @@ runs:
            git config user.name "sentinel-bot"
            git config user.email "sentinel-bot@users.noreply.github.com"
            
-           # Padrão fixo: sentinel/audit/<branch-origem>
            REPORT_BRANCH="sentinel/audit/${HEAD_REF}"
            
            git checkout "$HEAD_REF"
            git checkout -B "$REPORT_BRANCH"
-           
            git add "$REPORT_PATH"
-           # [skip ci] no commit é vital
-           git commit -m "docs(sentinel): update audit report [skip ci]"
-           
+           git commit -m "docs(sentinel): audit report for ${HEAD_REF} [skip ci]"
            git push -f origin "$REPORT_BRANCH"
            
-           # Tenta criar PR, ignora se já existe
+           # Tenta criar PR
            gh pr create \
              --base "$HEAD_REF" \
              --head "$REPORT_BRANCH" \
@@ -181,23 +220,42 @@ runs:
       shell: bash
       env:
         PR_URL: ${{ steps.create_pr.outputs.pr_url }}
+        GLOBAL_FOUND: ${{ steps.global_check.outputs.found }}
+        GLOBAL_REF: ${{ steps.global_check.outputs.ref }}
       run: |
         set -euo pipefail
         
-        STATUS=$(cat /tmp/scan_status)
-        COUNT=$(cat /tmp/scan_count)
+        # Recupera status, default para valores vazios
+        if [ -f /tmp/scan_status ]; then
+           STATUS=$(cat /tmp/scan_status)
+           COUNT=$(cat /tmp/scan_count)
+        else
+           # Se não rodou scan (ex: achou globalmente), definimos defaults
+           STATUS="SKIPPED"
+           COUNT="-"
+        fi
         
-        if [ "$STATUS" == "FOUND" ]; then
+        # Lógica de Mensagem de Interface
+        if [ "$GLOBAL_FOUND" == "true" ]; then
+           STATUS="PREVIOUSLY_AUDITED"
+           MSG="Já auditado."
+           # Removemos detalhes técnicos da ref do git grep (SHA:PATH)
+           CLEAN_REF=$(echo "$GLOBAL_REF" | cut -d':' -f1)
+           GUIDE="O código atual já possui um relatório de auditoria válido encontrado em: \`$CLEAN_REF\`."
+           COLOR="#3fb950" # Verde (Economizamos processamento!)
+           
+        elif [ "$STATUS" == "FOUND" ]; then
            MSG="Literais detectados ($COUNT)."
            GUIDE="Relatório disponível em: **[Ver PR de Auditoria]($PR_URL)**."
            COLOR="#dbab09"
-        elif [ "$STATUS" == "CLEAN" ]; then
+           
+        elif [ "$STATUS" == "CLEAN" ] || [ "$STATUS" == "NO_FILES" ]; then
            MSG="Código limpo."
            GUIDE="Nenhum literal hardcoded detectado."
            COLOR="#3fb950"
         else
            MSG="Ignorado."
-           GUIDE="Sem alterações."
+           GUIDE="Sem alterações relevantes."
            COLOR="#8b949e"
         fi
 
@@ -211,7 +269,7 @@ runs:
           '{
             analysis: {
               status: $status,
-              total_findings: ($count | tonumber),
+              total_findings: $count,
               report_pr_url: $url
             },
             ui: {
