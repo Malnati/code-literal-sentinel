@@ -1,4 +1,4 @@
-# Malnati/code-literal-sentinel@v2.5.0
+# Malnati/code-literal-sentinel@v3.0.0
 name: "Code Literal Sentinel"
 description: "Varredura com idempotência baseada em Assinatura de Conteúdo (Anti-Loop Definitivo)."
 author: "Ricardo Malnati"
@@ -29,55 +29,11 @@ outputs:
 runs:
   using: "composite"
   steps:
-    # ------------------------------------------------------------------
-    # STEP 0: DIAGNÓSTICO
-    # ------------------------------------------------------------------
-    - id: debug_inputs
-      shell: bash
-      env:
-        EXTS: ${{ inputs.file_extensions }}
-      run: |
-        echo "::group::🔍 Step 0: Sentinel Configuration (v2.5.0)"
-        echo "⚙️  Extensions: .($EXTS)"
-        echo "⚙️  Mode: Managed (Internal Paths)"
-        echo "⚙️  Strategy: Content Signature Idempotency"
-        echo "::endgroup::"
 
     # ------------------------------------------------------------------
-    # STEP 0.1: CIRCUIT BREAKER (Branch Name & Bot)
-    # ------------------------------------------------------------------
-    - id: circuit_breaker
-      shell: bash
-      env:
-        HEAD_REF: ${{ github.head_ref }}
-      run: |
-        BOT_NAME="sentinel-bot"
-        
-        if [[ "$HEAD_REF" == "sentinel/"* ]]; then
-           echo "🛑 Loop Branch: Branch de auditoria ignorada."
-           echo "skip=true" >> "$GITHUB_OUTPUT"
-           exit 0
-        fi
-
-        # Tenta identificar se o último commit foi apenas de documentação do bot
-        if [ -f .git/shallow ]; then
-           git fetch --depth=1 origin "$HEAD_REF" 2>/dev/null || true
-        fi
-        LAST_AUTHOR=$(git log -1 --pretty=format:'%an')
-
-        if [[ "$LAST_AUTHOR" == "$BOT_NAME" ]]; then
-           echo "🛑 Loop Bot: Commit do Bot ignorado."
-           echo "skip=true" >> "$GITHUB_OUTPUT"
-           exit 0
-        fi
-
-        echo "skip=false" >> "$GITHUB_OUTPUT"
-
-    # ------------------------------------------------------------------
-    # STEP 0.5: PERMISSÕES
+    # STEP 0: PERMISSÕES
     # ------------------------------------------------------------------
     - id: check_perms
-      if: steps.circuit_breaker.outputs.skip != 'true'
       shell: bash
       env:
         TOKEN: ${{ inputs.token }}
@@ -88,59 +44,9 @@ runs:
         fi
 
     # ------------------------------------------------------------------
-    # STEP 0.8: CÁLCULO DE ASSINATURA E BUSCA (A Mágica acontece aqui)
-    # ------------------------------------------------------------------
-    - id: global_check
-      if: steps.circuit_breaker.outputs.skip != 'true'
-      shell: bash
-      env:
-        EXTS: ${{ inputs.file_extensions }}
-        EXCLUDE: ${{ inputs.exclude_patterns }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      run: |
-        echo "::group::🕵️ Step 0.8: Content Signature Check"
-        
-        # 1. Gerar Assinatura do Código Atual
-        # Lista todos os arquivos trackeados, filtra pelas extensões e exclusões, e gera um hash do conjunto
-        echo "🧮 Calculando assinatura do código..."
-        
-        SIGNATURE=$(git ls-tree -r HEAD --name-only \
-          | grep -E "\.($EXTS)$" \
-          | grep -vE "$EXCLUDE" \
-          | xargs -d '\n' git hash-object 2>/dev/null | md5sum | awk '{print $1}' || echo "empty")
-          
-        echo "🔑 Assinatura Atual: $SIGNATURE"
-        
-        # 2. Preparar Busca Histórica
-        INTERNAL_BOT_EMAIL="sentinel-bot@users.noreply.github.com"
-        if [ -f .git/shallow ]; then
-           git fetch --unshallow 2>/dev/null || true
-        fi
-        git fetch --all --quiet
-
-        SEARCH_KEY="> **Content Signature:** $SIGNATURE"
-        echo "🔍 Buscando relatório prévio com esta assinatura..."
-
-        # Busca apenas nos commits do bot
-        FOUND_REF=$(git grep -I -F -l "$SEARCH_KEY" $(git rev-list --all --author="$INTERNAL_BOT_EMAIL") -- "*.md" 2>/dev/null | head -n 1 || true)
-        
-        if [ -n "$FOUND_REF" ]; then
-           echo "✅ Relatório Válido Encontrado: $FOUND_REF"
-           echo "   O código fonte não mudou desde a última auditoria."
-           echo "found=true" >> "$GITHUB_OUTPUT"
-           echo "ref=$FOUND_REF" >> "$GITHUB_OUTPUT"
-        else
-           echo "⚪ Nenhuma auditoria encontrada para esta assinatura de código."
-           echo "found=false" >> "$GITHUB_OUTPUT"
-           echo "signature=$SIGNATURE" >> "$GITHUB_OUTPUT"
-        fi
-        echo "::endgroup::"
-
-    # ------------------------------------------------------------------
     # STEP 1: SCAN
     # ------------------------------------------------------------------
     - id: scan
-      if: steps.circuit_breaker.outputs.skip != 'true' && steps.global_check.outputs.found != 'true'
       shell: bash
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -151,6 +57,11 @@ runs:
       run: |
         set -euo pipefail
         echo "🔎 Scanning..."
+        echo "BASE_SHA: $BASE_SHA"
+        echo "HEAD_SHA: $HEAD_SHA"
+        echo "EXTS: $EXTS"
+        echo "EXCLUDE: $EXCLUDE"
+        echo "SIGNATURE: $SIGNATURE"
         
         REPORT_DIR=".github/sentinel-reports"
         FILENAME="audit-report.md"
@@ -161,10 +72,16 @@ runs:
           | grep -E "\.($EXTS)$" \
           | grep -vE "$EXCLUDE" || true)
 
+        echo "FILES:"
+        echo "$FILES"
+
         if [ -z "$FILES" ]; then
           echo "NO_FILES" > /tmp/scan_status
           echo "0" > /tmp/scan_count
-          rm -f "$FULL_PATH"
+          rm -f "$FULL_PATH" || true
+          echo "status=NO_FILES" >> "$GITHUB_OUTPUT"
+          echo "count=0" >> "$GITHUB_OUTPUT"
+          echo "report_path=" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
@@ -180,120 +97,67 @@ runs:
         echo "\`\`\`" >> "$FULL_PATH"
 
         COUNT=$(grep -cE "$PATTERN" "$FULL_PATH" || true)
+        echo "COUNT: $COUNT"
         
         if [ "$COUNT" -gt "0" ]; then
            echo "FOUND" > /tmp/scan_status
            echo "$COUNT" > /tmp/scan_count
-           echo "path=$FULL_PATH" >> "$GITHUB_OUTPUT"
+           echo "status=FOUND" >> "$GITHUB_OUTPUT"
+           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+           echo "report_path=$FULL_PATH" >> "$GITHUB_OUTPUT"
         else
            echo "CLEAN" > /tmp/scan_status
            echo "0" > /tmp/scan_count
-           rm "$FULL_PATH"
+           rm -f "$FULL_PATH" || true
+           echo "status=CLEAN" >> "$GITHUB_OUTPUT"
+           echo "count=0" >> "$GITHUB_OUTPUT"
+           echo "report_path=" >> "$GITHUB_OUTPUT"
         fi
 
     # ------------------------------------------------------------------
-    # STEP 2: GIT OPS (Mesma lógica de antes)
-    # ------------------------------------------------------------------
-    - id: create_pr
-      if: steps.circuit_breaker.outputs.skip != 'true' && steps.global_check.outputs.found != 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.token }}
-        REPORT_PATH: ${{ steps.scan.outputs.path }}
-        HEAD_REF: ${{ github.head_ref }}
-        PR_NUM: ${{ github.event.pull_request.number }}
-      run: |
-        set -euo pipefail
-        
-        STATUS=$(cat /tmp/scan_status)
-        PR_URL=""
-        INTERNAL_BOT_NAME="sentinel-bot"
-        INTERNAL_BOT_EMAIL="sentinel-bot@users.noreply.github.com"
-        
-        if [ "$STATUS" == "FOUND" ]; then
-           git config user.name "$INTERNAL_BOT_NAME"
-           git config user.email "$INTERNAL_BOT_EMAIL"
-           
-           REPORT_BRANCH="sentinel/audit/${HEAD_REF}"
-           
-           git checkout "$HEAD_REF"
-           git checkout -B "$REPORT_BRANCH"
-           git add "$REPORT_PATH"
-           git commit -m "docs(sentinel): audit report [skip ci]"
-           git push -f origin "$REPORT_BRANCH"
-           
-           gh pr create \
-             --base "$HEAD_REF" \
-             --head "$REPORT_BRANCH" \
-             --title "🛡️ Sentinel Audit: PR #$PR_NUM" \
-             --body "Relatório de literais." || true
-             
-           PR_URL=$(gh pr view "$REPORT_BRANCH" --json url -q .url)
-           echo "✅ PR: $PR_URL"
-        fi
-        
-        echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
-
-    # ------------------------------------------------------------------
-    # STEP 3: JSON OUTPUT
+    # STEP 2: JSON OUTPUT
     # ------------------------------------------------------------------
     - id: generate_output
       if: steps.circuit_breaker.outputs.skip != 'true'
       shell: bash
       env:
-        PR_URL: ${{ steps.create_pr.outputs.pr_url }}
         GLOBAL_FOUND: ${{ steps.global_check.outputs.found }}
         GLOBAL_REF: ${{ steps.global_check.outputs.ref }}
       run: |
         set -euo pipefail
-        
+
         if [ -f /tmp/scan_status ]; then
-           STATUS=$(cat /tmp/scan_status)
-           COUNT=$(cat /tmp/scan_count)
+          STATUS=$(cat /tmp/scan_status)
         else
-           STATUS="SKIPPED"
-           COUNT="-"
-        fi
-        
-        if [ "$GLOBAL_FOUND" == "true" ]; then
-           STATUS="PREVIOUSLY_AUDITED"
-           MSG="Já auditado."
-           CLEAN_REF=$(echo "$GLOBAL_REF" | cut -d':' -f1)
-           GUIDE="A assinatura do código não mudou. Relatório existente em: \`$CLEAN_REF\`."
-           COLOR="#3fb950"
-        elif [ "$STATUS" == "FOUND" ]; then
-           MSG="Literais detectados ($COUNT)."
-           GUIDE="Relatório gerado: **[Ver PR de Auditoria]($PR_URL)**."
-           COLOR="#dbab09"
-        elif [ "$STATUS" == "CLEAN" ]; then
-           MSG="Código limpo."
-           GUIDE="Nenhum literal."
-           COLOR="#3fb950"
-        else
-           MSG="Ignorado."
-           GUIDE="Sem alterações."
-           COLOR="#8b949e"
+          STATUS="SKIPPED"
         fi
 
-        jq -n \
-          --arg status "$STATUS" \
-          --arg count "$COUNT" \
-          --arg msg "$MSG" \
-          --arg guide "$GUIDE" \
-          --arg url "$PR_URL" \
-          --arg color "$COLOR" \
-          '{
-            analysis: {
-              status: $status,
-              total_findings: $count,
-              report_pr_url: $url
-            },
-            ui: {
-              message: $msg,
-              guidance: $guide,
-              color: $color
-            }
-          }' > /tmp/output_payload.json
+        if [ -f /tmp/scan_count ]; then
+          COUNT=$(cat /tmp/scan_count)
+        else
+          COUNT="-"
+        fi
 
-        JSON_LINE=$(jq -c . /tmp/output_payload.json)
-        echo "json_payload=$JSON_LINE" >> "$GITHUB_OUTPUT"
+        DETAIL=""
+        if [ "$GLOBAL_FOUND" = "true" ]; then
+          STATUS="PREVIOUSLY_AUDITED"
+          CLEAN_REF=$(echo "$GLOBAL_REF" | cut -d':' -f1)
+          DETAIL="A assinatura do código não mudou. Relatório existente em: \`$CLEAN_REF\`."
+        fi
+
+        if command -v jq >/dev/null 2>&1; then
+          JSON=$(jq -n \
+            --arg status "$STATUS" \
+            --arg count "$COUNT" \
+            --arg global_found "$GLOBAL_FOUND" \
+            --arg global_ref "$GLOBAL_REF" \
+            --arg detail "$DETAIL" \
+            '{status:$status, count:$count, global_found:$global_found, global_ref:$global_ref, detail:$detail}')
+        else
+          JSON="{\"status\":\"$STATUS\",\"count\":\"$COUNT\",\"global_found\":\"$GLOBAL_FOUND\",\"global_ref\":\"$GLOBAL_REF\",\"detail\":\"$DETAIL\"}"
+        fi
+
+        echo "JSON_RESULT: $JSON"
+        echo "json=$JSON" >> "$GITHUB_OUTPUT"
+        echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+        echo "count=$COUNT" >> "$GITHUB_OUTPUT"
