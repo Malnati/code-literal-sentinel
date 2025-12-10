@@ -1,6 +1,6 @@
-# Malnati/code-literal-sentinel@v3.0.0
+# Malnati/code-literal-sentinel@v3.0.1
 name: "Code Literal Sentinel"
-description: "Varredura com idempotência baseada em Assinatura de Conteúdo (Anti-Loop Definitivo)."
+description: "Varredura com idempotência."
 author: "Ricardo Malnati"
 
 branding:
@@ -24,7 +24,7 @@ inputs:
 outputs:
   result_json:
     description: "JSON de diagnóstico."
-    value: ${{ steps.generate_output.outputs.json_payload }}
+    value: ${{ steps.generate_output.outputs.json }}
 
 runs:
   using: "composite"
