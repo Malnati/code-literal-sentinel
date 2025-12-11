@@ -1,4 +1,4 @@
-# Malnati/code-literal-sentinel@v3.0.3
+# Malnati/code-literal-sentinel@v3.0.4
 name: "Code Literal Sentinel"
 description: "Varredura com idempotência."
 author: "Ricardo Malnati"
@@ -148,3 +148,14 @@ runs:
         echo "json=$JSON" >> "$GITHUB_OUTPUT"
         echo "status=$STATUS" >> "$GITHUB_OUTPUT"
         echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+    - id: finalize
+      shell: bash
+      run: |
+        set -euo pipefail
+        # monta $JSON ...
+        echo "JSON_RESULT: $JSON"
+        echo "json=$JSON" >> "$GITHUB_OUTPUT"
+        echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+        echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+        
